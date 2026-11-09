@@ -412,6 +412,7 @@ function BlueprintEditor() {
                 onConnect={onConnect}
                 onNodeClick={(_, node) => setSelectedNodeId(node.id)}
                 onPaneClick={() => setSelectedNodeId('')}
+                minZoom={0.15}
                 fitView
                 className="text-slate-100"
               >
