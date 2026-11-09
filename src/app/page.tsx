@@ -1,194 +1,231 @@
 'use client';
 
-import Link from 'next/link';
-import { ArrowRight, BarChart3, Brain, Database, Gauge, Layers3, PanelLeft, ShieldCheck, Moon, Sun } from 'lucide-react';
-import { useTheme } from './theme-provider';
+import { useRef, useState, type ChangeEvent } from 'react';
+import { Activity, ArrowUpRight, Cpu, Database, ShieldCheck } from 'lucide-react';
+import { analyzeSpectrum, extractFeatures, MAX_CSV_BYTES, parseSignalCsv } from '../lib/signal';
 
-const kpis = [
-  { label: '设备案例', value: '3', delta: '轴承、齿轮箱、电机' },
-  { label: '实验快照', value: '3', delta: '故障分类与异常检测' },
-  { label: '模型示例', value: '3', delta: '供界面演示' },
-  { label: '告警样例', value: '2', delta: '振动与数据漂移' },
+const exampleCsv = '/PHM-Workbench/examples/bearing-vibration.csv';
+const stages = [
+  { id: 'import', title: '数据标准化', icon: Database },
+  { id: 'features', title: '特征工程', icon: Cpu },
+  { id: 'spectrum', title: '信号分析', icon: Activity },
 ];
 
-const activity = [
-  { title: '轴承故障分类', status: '实验示例', meta: 'XGBoost · 振动特征' },
-  { title: '齿轮箱异常检测', status: '模型示例', meta: 'Isolation Forest · 频谱特征' },
-  { title: '电机状态监测', status: '监控示例', meta: '电流与转速 · 合成数据' },
-];
+type Dataset = ReturnType<typeof parseSignalCsv> & { name: string };
+type Features = ReturnType<typeof extractFeatures>;
+type Spectrum = ReturnType<typeof analyzeSpectrum>;
+type Point = { x: number; y: number };
 
-const steps = [
-  { title: '信号', desc: '查看振动、电流和转速示例。' },
-  { title: '特征', desc: '配置时域和频域特征节点。' },
-  { title: '编排', desc: '在画布上添加、连接和编辑节点。' },
-  { title: '版本', desc: '保存并比较本地工作流快照。' },
-];
-
-const nav = [
-  { label: '总览', href: '/overview', icon: Gauge },
-  { label: '数据集', href: '/datasets', icon: Database },
-  { label: '实验', href: '/experiments', icon: Brain },
-  { label: '蓝图', href: '/blueprints', icon: Layers3 },
-  { label: '模型', href: '/models', icon: BarChart3 },
-  { label: '部署', href: '/deployments', icon: ShieldCheck },
-  { label: '监控', href: '/monitoring', icon: Gauge },
-];
-
-function StatusPill({ children }: { children: React.ReactNode }) {
-  return <span className="inline-flex items-center rounded-full border border-[color:var(--border)] bg-[color:var(--panel)] px-3 py-1 text-xs text-[color:var(--muted)]">{children}</span>;
+function format(value: number | null, digits = 4) {
+  if (value === null || !Number.isFinite(value)) return '—';
+  return new Intl.NumberFormat('en-US', { maximumFractionDigits: digits }).format(value);
 }
 
-function ThemeButton() {
-  const { theme, toggleTheme } = useTheme();
-  return (
-    <button
-      onClick={toggleTheme}
-      className="inline-flex items-center gap-2 rounded-full border border-[color:var(--border)] bg-[color:var(--bg-elevated)] px-4 py-2 text-sm font-medium text-[color:var(--text)] shadow-[var(--shadow)] backdrop-blur transition hover:-translate-y-0.5"
-      type="button"
-    >
-      {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
-      {theme === 'dark' ? '切换到浅色' : '切换到深色'}
-    </button>
-  );
+function plotPoints(points: Point[]) {
+  const perBucket = Math.ceil(points.length / 450);
+  if (perBucket <= 1) return points;
+  const plotted: Point[] = [];
+  for (let i = 0; i < points.length; i += perBucket) {
+    const bucket = points.slice(i, i + perBucket);
+    plotted.push(bucket.reduce((best, point) => point.y > best.y ? point : best));
+  }
+  return plotted;
+}
+
+function SignalChart({ points, title, unit, from, to, min, max, peak }: {
+  points: Point[]; title: string; unit: string; from: number; to: number;
+  min: number; max: number; peak?: number;
+}) {
+  const width = 700;
+  const left = 61;
+  const right = 22;
+  const top = 15;
+  const bottom = 34;
+  const height = 202;
+  const x = (value: number) => left + (value - from) / (to - from || 1) * (width - left - right);
+  const y = (value: number) => height - bottom - (value - min) / (max - min || 1) * (height - top - bottom);
+  const ticks = [0, .25, .5, .75, 1];
+  return <figure className="chart">
+    <figcaption>{title}</figcaption>
+    <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={title} className="plot">
+      {ticks.map(tick => {
+        const vertical = min + tick * (max - min);
+        const horizontal = from + tick * (to - from);
+        return <g key={tick}>
+          <line x1={left} x2={width - right} y1={y(vertical)} y2={y(vertical)} />
+          <line x1={x(horizontal)} x2={x(horizontal)} y1={top} y2={height - bottom} />
+          <text x={left - 8} y={y(vertical) + 4} textAnchor="end">{format(vertical, 2)}</text>
+          <text x={x(horizontal)} y={height - 11} textAnchor="middle">{format(horizontal, 2)}</text>
+        </g>;
+      })}
+      {peak !== undefined && <line className="peak-line" x1={x(peak)} x2={x(peak)} y1={top} y2={height - bottom} />}
+      <polyline points={plotPoints(points).map(point => `${x(point.x).toFixed(2)},${y(point.y).toFixed(2)}`).join(' ')} />
+    </svg>
+    <p className="plot-unit">{unit}</p>
+  </figure>;
 }
 
 export default function Home() {
-  return (
-    <main className="min-h-screen text-[color:var(--text)]">
-      <section className="mx-auto flex min-h-screen max-w-[1600px] gap-6 px-6 py-6 lg:px-8">
-        <aside className="hidden w-[290px] shrink-0 rounded-[28px] border border-[color:var(--border)] bg-[color:var(--panel)] p-5 shadow-[var(--shadow)] backdrop-blur xl:block">
-          <div className="flex items-center gap-3 border-b border-[color:var(--border)] pb-5">
-            <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-[color:var(--accent)] to-[color:var(--accent-2)] text-white shadow-lg shadow-cyan-500/20">
-              <PanelLeft size={22} />
-            </div>
-            <div>
-              <p className="text-sm font-semibold tracking-wide text-[color:var(--text)]">PHM Workbench</p>
-              <p className="text-xs text-[color:var(--muted)]">预测性维护工作台</p>
-            </div>
-          </div>
+  const input = useRef<HTMLInputElement>(null);
+  const [data, setData] = useState<Dataset | null>(null);
+  const [column, setColumn] = useState(0);
+  const [rate, setRate] = useState('');
+  const [features, setFeatures] = useState<Features | null>(null);
+  const [spectrum, setSpectrum] = useState<Spectrum | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [announcement, setAnnouncement] = useState('');
+  const channel = data?.columns[column];
+  const sampleRate = Number(rate);
+  const validRate = Number.isFinite(sampleRate) && sampleRate > 0 && sampleRate <= 10_000_000;
+  const wave = channel?.samples.slice(0, 256) ?? [];
+  const waveMin = Math.min(...wave);
+  const waveMax = Math.max(...wave);
 
-          <nav className="mt-5 space-y-2">
-            {nav.map((item) => {
-              const Icon = item.icon;
-              return (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  className="flex items-center gap-3 rounded-2xl px-4 py-3 text-sm text-[color:var(--muted)] transition hover:bg-[color:var(--bg-elevated)] hover:text-[color:var(--text)]"
-                >
-                  <Icon size={18} />
-                  {item.label}
-                </Link>
-              );
-            })}
-          </nav>
+  function importText(text: string, name: string) {
+    const parsed = parseSignalCsv(text);
+    setData({ ...parsed, name });
+    setColumn(0);
+    setRate(parsed.rate === null ? '' : String(parsed.rate));
+    setFeatures(null);
+    setSpectrum(null);
+    setAnnouncement(`已导入 ${name}，共 ${parsed.rowCount} 个采样点。`);
+  }
 
-          <div className="mt-6 rounded-3xl border border-[color:var(--border)] bg-[color:var(--bg-elevated)] p-4">
-            <p className="text-xs uppercase tracking-[0.28em] text-[color:var(--muted)]">工作区</p>
-            <p className="mt-2 text-sm font-medium text-[color:var(--text)]">旋转机械状态监测</p>
-            <p className="mt-1 text-xs text-[color:var(--muted)]">轴承 · 齿轮箱 · 电机</p>
-          </div>
+  async function loadExample() {
+    setError('');
+    setBusy(true);
+    try {
+      const response = await fetch(exampleCsv);
+      if (!response.ok) throw new Error('示例 CSV 暂时无法加载，请重试。');
+      importText(await response.text(), 'bearing-vibration.csv');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '无法载入示例 CSV。');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function loadFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = '';
+    if (!file) return;
+    setError('');
+    if (file.size > MAX_CSV_BYTES) {
+      setError('请选择 2 MB 以内的 CSV。');
+      return;
+    }
+    setBusy(true);
+    try {
+      importText(await file.text(), file.name);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '无法读取 CSV。');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function computeFeatures() {
+    if (!channel) return;
+    setFeatures(extractFeatures(channel.samples));
+    setAnnouncement('振动特征计算完成。');
+  }
+
+  function computeSpectrum() {
+    if (!channel || !validRate) return;
+    const result = analyzeSpectrum(channel.samples, sampleRate);
+    setSpectrum(result);
+    setAnnouncement(result.peak ? `频谱计算完成，主频 ${format(result.peak.hz)} Hz。` : '频谱计算完成，信号没有交流分量。');
+  }
+
+  return <>
+    <header className="studio-header">
+      <div className="shell header-content">
+        <a className="brand" href="#main"><span className="brand-icon"><ShieldCheck size={21} aria-hidden="true" /></span><span>PHM Studio</span></a>
+        <a className="text-link" href="https://phoenixsjtu.github.io/?lang=zh#research">个人主页 <ArrowUpRight size={15} aria-hidden="true" /></a>
+      </div>
+    </header>
+    <main className="shell" id="main">
+      <div className="intro">
+        <p className="intro-tag">旋转机械 · 振动分析</p>
+        <h1>预测性维护工作台</h1>
+        <p>从 CSV 导入到振动特征和频谱。载入合成轴承信号，即可在浏览器里完成一次分析。</p>
+      </div>
+      <div className="workspace">
+        <aside className="workflow" aria-label="工作流程">
+          <p>分析流程</p>
+          <ol>
+            {stages.map(({ id, title, icon: Icon }, i) => <li key={id}>
+              <a href={`#${id}`}><Icon size={17} aria-hidden="true" /><span>{title}</span><small>{String(i + 1).padStart(2, '0')}</small></a>
+            </li>)}
+          </ol>
+          <p className="privacy">CSV 读取和计算均在当前浏览器完成。</p>
         </aside>
-
-        <div className="flex min-w-0 flex-1 flex-col gap-6">
-          <header className="rounded-[28px] border border-[color:var(--border)] bg-[color:var(--panel)] px-6 py-5 shadow-[var(--shadow)] backdrop-blur">
-            <div className="flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between">
-              <div className="max-w-3xl">
-                <div className="mb-3 flex flex-wrap items-center gap-2">
-                  <StatusPill>预测性维护</StatusPill>
-                  <StatusPill>旋转机械</StatusPill>
-                </div>
-                <h1 className="text-3xl font-semibold tracking-tight md:text-5xl">
-                  预测性维护工作台
-                </h1>
-                <p className="mt-4 max-w-2xl text-sm leading-7 text-[color:var(--muted)] md:text-base">
-                  从振动信号到故障诊断。体验蓝图编排和本地版本管理，并浏览实验、模型与监控的示例快照。
-                </p>
-              </div>
-
-              <div className="flex items-center gap-3">
-                <ThemeButton />
-              </div>
+        <div className="stages">
+          <section className="stage" id="import" aria-labelledby="import-title">
+            <div className="stage-title"><span>01</span><h2 id="import-title">数据标准化</h2></div>
+            <p className="stage-description">载入示例或选择含数值信号列的 CSV，指定分析通道和采样率。</p>
+            <div className="actions">
+              <button className="primary" type="button" onClick={loadExample} disabled={busy}>{busy ? '正在读取…' : '载入示例 CSV'}</button>
+              <button type="button" onClick={() => input.current?.click()} disabled={busy}>选择本地 CSV</button>
+              <input ref={input} type="file" accept=".csv,text/csv" onChange={loadFile} hidden />
+              <a className="text-link" href={exampleCsv} download>下载示例 <ArrowUpRight size={14} aria-hidden="true" /></a>
             </div>
-
-            <nav aria-label="工作区导航" className="mt-5 flex flex-wrap gap-2 xl:hidden">
-              {nav.map(({ label, href }) => (
-                <Link key={href} href={href} className="rounded-full border border-[color:var(--border)] px-3 py-1.5 text-sm">
-                  {label}
-                </Link>
-              ))}
-            </nav>
-            <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-              {kpis.map((item) => (
-                <div key={item.label} className="rounded-3xl border border-[color:var(--border)] bg-[color:var(--bg-elevated)] p-4">
-                  <p className="text-xs text-[color:var(--muted)]">{item.label}</p>
-                  <p className="mt-2 text-2xl font-semibold text-[color:var(--text)]">{item.value}</p>
-                  <p className="mt-1 text-xs text-[color:var(--muted)]">{item.delta}</p>
-                </div>
-              ))}
-            </div>
-          </header>
-
-          <section className="grid gap-6 xl:grid-cols-[1.4fr_0.9fr]">
-            <div className="rounded-[28px] border border-[color:var(--border)] bg-[color:var(--panel)] p-6 shadow-[var(--shadow)] backdrop-blur">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-xs uppercase tracking-[0.32em] text-[color:var(--muted)]">工作流</p>
-                  <h2 className="mt-2 text-xl font-semibold text-[color:var(--text)]">诊断工作流</h2>
-                </div>
-                <Link
-                  href="/blueprints"
-                  className="inline-flex items-center gap-2 rounded-full border border-[color:var(--border)] bg-[color:var(--bg-elevated)] px-4 py-2 text-sm text-[color:var(--text)] transition hover:bg-[color:var(--panel-strong)]"
-                >
-                  打开蓝图
-                  <ArrowRight size={16} />
-                </Link>
+            {error && <p className="error" role="alert">{error}</p>}
+            {data && <div className="loaded">
+              <p className="data-file"><strong>{data.name}</strong><span>{format(data.rowCount, 0)} 个采样点</span></p>
+              <div className="fields">
+                <label>信号列<select value={column} onChange={event => {
+                  setColumn(Number(event.target.value));
+                  setFeatures(null);
+                  setSpectrum(null);
+                }}>
+                  {data.columns.map(({ name }, i) => <option key={name} value={i}>{name}</option>)}
+                </select></label>
+                <label>采样率 (Hz)<input type="number" min="0" max="10000000" step="any" value={rate} onChange={event => {
+                  setRate(event.target.value);
+                  setSpectrum(null);
+                }} placeholder="输入采样率" /></label>
               </div>
-
-              <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-                {steps.map((step, index) => (
-                  <div
-                    key={step.title}
-                    className="rounded-3xl border border-[color:var(--border)] bg-[color:var(--bg-elevated)] p-5 transition duration-300 hover:-translate-y-1 hover:shadow-[var(--shadow)]"
-                  >
-                    <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-[color:var(--accent)]/10 text-sm font-semibold text-[color:var(--accent)]">
-                      0{index + 1}
-                    </div>
-                    <h3 className="mt-4 text-base font-semibold text-[color:var(--text)]">{step.title}</h3>
-                    <p className="mt-2 text-sm leading-6 text-[color:var(--muted)]">{step.desc}</p>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="rounded-[28px] border border-[color:var(--border)] bg-[color:var(--panel)] p-6 shadow-[var(--shadow)] backdrop-blur">
-              <p className="text-xs uppercase tracking-[0.32em] text-[color:var(--muted)]">示例记录</p>
-              <h2 className="mt-2 text-xl font-semibold text-[color:var(--text)]">设备与模型</h2>
-              <div className="mt-5 space-y-3">
-                {activity.map((item) => (
-                  <div key={item.title} className="rounded-3xl border border-[color:var(--border)] bg-[color:var(--bg-elevated)] p-4">
-                    <div className="flex items-start justify-between gap-4">
-                      <div>
-                        <p className="font-medium text-[color:var(--text)]">{item.title}</p>
-                        <p className="mt-1 text-sm text-[color:var(--muted)]">{item.meta}</p>
-                      </div>
-                      <span className="rounded-full border border-[color:var(--good)]/20 bg-[color:var(--good)]/10 px-3 py-1 text-xs text-[color:var(--good)]">
-                        {item.status}
-                      </span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              <div className="mt-6 rounded-3xl border border-[color:var(--warn)]/20 bg-[color:var(--warn)]/10 p-4">
-                <p className="text-xs uppercase tracking-[0.28em] text-[color:var(--warn)]">提示</p>
-                <p className="mt-2 text-sm text-[color:var(--text)]">告警样例显示齿轮箱 G-02 振动 RMS 升高。</p>
-                <p className="mt-1 text-xs text-[color:var(--muted)]">监控页面展示对应的合成告警。</p>
-              </div>
-            </div>
+              {!validRate && <p className="hint">计算频谱前请输入大于 0 且不超过 10 MHz 的采样率。</p>}
+              <SignalChart title={`时域波形 · 前 ${wave.length} 个采样点`} unit={validRate ? '时间 (ms)' : '样本序号'}
+                points={wave.map((value, i) => ({ x: validRate ? i * 1000 / sampleRate : i, y: value }))}
+                from={0} to={validRate ? (wave.length - 1) * 1000 / sampleRate : wave.length - 1}
+                min={waveMin === waveMax ? waveMin - 1 : waveMin} max={waveMin === waveMax ? waveMax + 1 : waveMax} />
+            </div>}
+          </section>
+          <section className="stage" id="features" aria-labelledby="features-title">
+            <div className="stage-title"><span>02</span><h2 id="features-title">特征工程</h2></div>
+            <p className="stage-description">按 v3 的定义计算去均值 RMS、峰值、峰值因子、脉冲因子和峭度。</p>
+            <button className="primary" type="button" onClick={computeFeatures} disabled={!channel || busy}>提取特征</button>
+            {features && <dl className="results" aria-label="特征结果">
+              <div><dt>去均值 RMS</dt><dd>{format(features.rms)}</dd></div>
+              <div><dt>峰值</dt><dd>{format(features.peak)}</dd></div>
+              <div><dt>峰值因子</dt><dd>{format(features.crestFactor)}</dd></div>
+              <div><dt>脉冲因子</dt><dd>{format(features.impulseFactor)}</dd></div>
+              <div><dt>峭度</dt><dd>{format(features.kurtosis)}</dd></div>
+            </dl>}
+          </section>
+          <section className="stage" id="spectrum" aria-labelledby="spectrum-title">
+            <div className="stage-title"><span>03</span><h2 id="spectrum-title">信号分析</h2></div>
+            <p className="stage-description">去均值并加 Hann 窗，计算单边幅值频谱。</p>
+            <button className="primary" type="button" onClick={computeSpectrum} disabled={!channel || !validRate || busy}>计算频谱</button>
+            {spectrum && <>
+              <dl className="results" aria-label="频谱结果">
+                <div><dt>主频</dt><dd>{spectrum.peak ? `${format(spectrum.peak.hz)} Hz` : '—'}</dd></div>
+                <div><dt>主频幅值</dt><dd>{format(spectrum.peak?.amplitude ?? null)}</dd></div>
+                <div><dt>频率分辨率</dt><dd>{format(spectrum.resolution)} Hz</dd></div>
+              </dl>
+              <SignalChart title="单边幅值频谱" unit="频率 (Hz)"
+                points={spectrum.bins.map(bin => ({ x: bin.hz, y: bin.amplitude }))}
+                from={0} to={spectrum.nyquist} min={0} max={Math.max(...spectrum.bins.map(bin => bin.amplitude)) || 1}
+                peak={spectrum.peak?.hz} />
+            </>}
           </section>
         </div>
-      </section>
+      </div>
+      <p className="sr-only" role="status">{announcement}</p>
     </main>
-  );
+    <footer className="shell studio-footer"><span>PHM Studio · v3 在线预览</span><a className="text-link" href="https://github.com/phoenixsjtu/PHM-Workbench">源码 <ArrowUpRight size={14} aria-hidden="true" /></a></footer>
+  </>;
 }
